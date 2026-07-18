@@ -41,6 +41,12 @@ import yfinance as yf
 from scipy.interpolate import interp1d
 
 ET = ZoneInfo("America/New_York")
+BNE = ZoneInfo("Australia/Brisbane")
+
+# Trade moments in ET: enter 15 min before the close, exit 15 min after the open.
+ENTRY_ET_HM = (15, 45)
+EXIT_ET_HM = (9, 45)
+
 BASE_DIR = Path(__file__).resolve().parent
 UNIVERSE_CACHE = BASE_DIR / "russell1000_cache.json"
 SCAN_DIR = BASE_DIR / "scans"
@@ -358,6 +364,60 @@ def entry_exit(earnings_date, timing):
     return earnings_date, next_trading_day(earnings_date)
 
 
+WEEKDAY_CN = "一二三四五六日"
+
+
+def et_moment_to_bne(d, hm):
+    """ET trading date + (hour, minute) -> Brisbane datetime (handles US DST)."""
+    return datetime(d.year, d.month, d.day, hm[0], hm[1], tzinfo=ET).astimezone(BNE)
+
+
+def fmt_bne(dt):
+    return f"{dt:%m-%d}(周{WEEKDAY_CN[dt.weekday()]}) {dt:%H:%M}"
+
+
+TIER_CN = {
+    "RECOMMENDED": "✅ 推荐",
+    "CONSIDER": "🟡 可考虑",
+    "NO_DATA": "❓ 无数据(报价延迟/盘外)",
+    "AVOID": "❌ 回避",
+}
+TIMING_CN = {"BMO": "盘前", "AMC": "盘后", "?": "时段未知⚠"}
+
+
+def build_cn_report(df, today_et, include_no_data=True):
+    """Chinese trade-signal summary: one block per candidate worth acting on."""
+    tiers = ["RECOMMENDED", "CONSIDER"] + (["NO_DATA"] if include_no_data else [])
+    rows = df[df["tier"].isin(tiers)]
+    if rows.empty:
+        return "本次扫描没有推荐或可考虑的标的。"
+
+    lines = []
+    for _, r in rows.iterrows():
+        entry_bne = et_moment_to_bne(r["entry (close-15m)"], ENTRY_ET_HM)
+        exit_bne = et_moment_to_bne(r["exit (open+15m)"], EXIT_ET_HM)
+        lines.append(f"{TIER_CN.get(r['tier'], r['tier'])}  {r['symbol']}  {r['company']}")
+        lines.append(
+            f"  财报: {r['earnings_date']:%m-%d} {TIMING_CN.get(r['timing'], r['timing'])}"
+            f"  市值 ${r['mcap_$B']}B"
+        )
+        entry_flag = "  ← 开仓日就是今天(ET)!" if r["entry (close-15m)"] == today_et else ""
+        lines.append(f"  开仓: 布里斯班 {fmt_bne(entry_bne)}{entry_flag}")
+        lines.append(f"  平仓: 布里斯班 {fmt_bne(exit_bne)}")
+        if r["tier"] != "NO_DATA":
+            lines.append(
+                f"  IV/RV={r['iv30_rv30']}  期限斜率={r['ts_slope_0_45']}"
+                f"  预期波动={r['expected_move_pct']}%"
+            )
+            if "earnings_check" in r and str(r.get("earnings_check", "")).startswith("MISMATCH"):
+                lines.append(f"  ⚠ 财报日期核对不一致({r['earnings_check']}),勿交易!")
+        else:
+            lines.append("  ⚠ 无法算 IV(Yahoo 报价延迟15分钟:盘外、或开盘后约30分钟内"
+                         "都会这样),以上仅为候选名单;以开仓日盘中的确认扫描为准")
+        lines.append("")
+    return "\n".join(lines).rstrip()
+
+
 def yf_earnings_check(symbol, expected_date):
     """Cross-check the Nasdaq date against yfinance's calendar."""
     try:
@@ -492,6 +552,8 @@ def scan(min_days, max_days, workers, verify, refresh_universe,
                 "timing": c["timing"],
                 "entry (close-15m)": entry_d,
                 "exit (open+15m)": exit_d,
+                "开仓(布里斯班)": fmt_bne(et_moment_to_bne(entry_d, ENTRY_ET_HM)),
+                "平仓(布里斯班)": fmt_bne(et_moment_to_bne(exit_d, EXIT_ET_HM)),
                 "company": c["company"][:28],
                 "mcap_$B": round(c["market_cap"] / 1e9, 1),
             }
@@ -531,12 +593,17 @@ def scan(min_days, max_days, workers, verify, refresh_universe,
         .reset_index(drop=True)
     )
     lead = ["tier", "symbol", "earnings_date", "timing",
-            "entry (close-15m)", "exit (open+15m)"]
+            "开仓(布里斯班)", "平仓(布里斯班)"]
     df = df[lead + [c for c in df.columns if c not in lead]]
     return df
 
 
 def main():
+    # Windows redirects default to the ANSI codepage — force UTF-8 for Chinese/emoji.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
     ap = argparse.ArgumentParser(description="Russell 1000 earnings IV-crush scanner")
     ap.add_argument("--min-days", type=int, default=1,
                     help="earliest earnings date, days from today ET (default 1)")
@@ -576,12 +643,17 @@ def main():
     print(df.to_string(index=False))
     print("=" * 100)
 
+    today_et = datetime.now(ET).date()
+    print("\n========== 中文信号摘要 ==========")
+    print(build_cn_report(df, today_et))
+    print("==================================")
+
     SCAN_DIR.mkdir(exist_ok=True)
     out = SCAN_DIR / f"scan_{datetime.now(ET):%Y-%m-%d_%H%M}ET.csv"
-    df.to_csv(out, index=False)
-    print(f"\nSaved: {out}")
-    print("\nReminder: IV metrics move intraday — re-run near the US close on the "
-          "entry day to confirm signals before placing the trade.")
+    df.to_csv(out, index=False, encoding="utf-8-sig")
+    print(f"\n已保存: {out}")
+    print("\n提醒: IV 指标盘中会变——开仓日临近美股收盘时(布里斯班早上 ~05:15)"
+          "重跑确认后再下单。")
 
 
 if __name__ == "__main__":
