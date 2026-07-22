@@ -606,6 +606,28 @@ TIER_CN = {
 TIMING_CN = {"BMO": "盘前", "AMC": "盘后", "?": "时段未知⚠"}
 
 
+def _is_true(v):
+    """vol_ok/ivrv_ok are real bools in-memory but strings after a CSV round-trip."""
+    return str(v).strip().lower() in ("true", "1")
+
+
+def consider_reason(r):
+    """Which half of the CONSIDER test failed.
+
+    CONSIDER hides two very different situations: IV that isn't actually rich
+    (the strategy's whole edge is absent — e.g. IBM at iv30/rv30 0.53) versus
+    an edge that's there but sits in a thin name you may not be able to fill.
+    The tier alone can't be acted on without knowing which one it is.
+    """
+    if r.get("tier") != "CONSIDER" or "ivrv_ok" not in r or "vol_ok" not in r:
+        return ""
+    if not _is_true(r["ivrv_ok"]):
+        return "  ← IV 不够贵(策略核心边缘缺失)"
+    if not _is_true(r["vol_ok"]):
+        return "  ← 成交量不足(边缘在但可能难成交)"
+    return ""
+
+
 def build_cn_report(df, today_et, include_no_data=True):
     """Chinese trade-signal summary: one block per candidate worth acting on."""
     tiers = ["RECOMMENDED", "CONSIDER"] + (["NO_DATA"] if include_no_data else [])
@@ -617,7 +639,8 @@ def build_cn_report(df, today_et, include_no_data=True):
     for _, r in rows.iterrows():
         entry_bne = et_moment_to_bne(r[COL_ENTRY], ENTRY_ET_HM)
         exit_bne = et_moment_to_bne(r[COL_EXIT], EXIT_ET_HM)
-        lines.append(f"{TIER_CN.get(r['tier'], r['tier'])}  {r['symbol']}  {r['company']}")
+        lines.append(f"{TIER_CN.get(r['tier'], r['tier'])}  {r['symbol']}  {r['company']}"
+                     f"{consider_reason(r)}")
         lines.append(
             f"  财报: {r['earnings_date']:%m-%d} {TIMING_CN.get(r['timing'], r['timing'])}"
             f"  市值 ${r['mcap_$B']}B"
