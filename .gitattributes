@@ -1,0 +1,4 @@
+# 本仓库在 Windows 上开发、在 Linux 服务器上部署。core.autocrlf=true 会给
+# 检出的文件加 CRLF,而 CRLF 的 shell 脚本在 Linux 上会报
+# "bad interpreter: /usr/bin/env bash^M"。强制这些文件用 LF。
+*.sh text eol=lf

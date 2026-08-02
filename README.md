@@ -99,6 +99,51 @@ Preview 邮件开头附**昨日信号自动复盘**(以真实 ET 09:45 出场价
 
 手动测试:`python notify.py confirm --force`(跳过时段检查)。
 
+## 部署到 Linux 服务器(deploy.sh)
+
+跑在 droplet 上就不用担心笔记本睡死漏掉信号。两条命令(把分支名和 IP 换成实际的):
+
+```bash
+git clone -b feat/refactor https://github.com/chrisudf/earnings-iv-scanner.git /root/earnings-iv-scanner
+```
+
+`notify_config.json` 在 `.gitignore` 里,不会跟着 git 走,要从本地单独传(在**本地**机器上跑):
+
+```bash
+scp notify_config.json root@<droplet-ip>:/root/earnings-iv-scanner/
+```
+
+然后在服务器上:
+
+```bash
+bash /root/earnings-iv-scanner/deploy.sh
+```
+
+`deploy.sh` 会建 venv、装依赖、校验邮件配置、写 crontab、最后 `--force` 跑一次冒烟测试
+(会真发一封邮件)。**幂等**——重复跑不重复装、不重复加 cron 行,改完代码 `git pull`
+后再跑一遍即可。`--no-cron` 只建环境不碰 crontab。
+
+**cron 只需要单触发**,不像 Windows 那边要为夏令时设两个:
+
+```
+CRON_TZ=America/New_York
+15 10 * * 1-5  ...notify.py preview   # ET 10:15,落在 10:00-10:45 窗口
+15 15 * * 1-5  ...notify.py confirm   # ET 15:15,落在 14:45-15:35 窗口
+```
+
+`CRON_TZ` 由 Vixie/ISC cron 支持(Ubuntu 默认),夏令时切换由系统时区库处理。
+旧 crontab 每次部署自动备份到 `scans/crontab.backup.<时间戳>`。
+
+**迁移注意**:
+
+- 别长期两边同时开——同一封信收两遍,而且 `scans/replay_log.csv` 的累计复盘统计
+  会在两台机器上各记一份、互相对不上。建议并行一天做对照,确认服务器信号与本地
+  一致后再 `Disable-ScheduledTask -TaskName EarningsIV-Preview`(和 `-Confirm`)。
+- 服务器 IP 在数据中心机房,Yahoo 的限速表现可能和家用宽带不同。首次冒烟测试若出现
+  大批 `NO_DATA` 或超时,那是 IP 被限速而非代码问题。
+- 服务器日志:`scans/notify_log.txt`(脚本自己的)和 `scans/cron.log`(cron 捕获的
+  stdout/stderr,含 traceback)。
+
 ## 数据源
 
 - 成分股：Wikipedia "Russell 1000 Index"（iShares IWB 有反爬墙，不可用）
