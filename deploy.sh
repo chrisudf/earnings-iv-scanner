@@ -59,9 +59,16 @@ chmod 600 "$CONFIG"   # 里面是 Gmail 应用专用密码
 mkdir -p "$BASE_DIR/scans"
 
 # --- 4. cron ----------------------------------------------------------------
-# 按 ET 排程（CRON_TZ 由 Vixie/ISC cron 支持，Ubuntu 默认即是），夏令时切换
-# 交给系统时区库处理 —— 不像 Windows 那边要为每个模式设两个触发时间。
-# 时刻取窗口中段：preview 窗口 ET 10:00-10:45，confirm 窗口 ET 14:45-15:35。
+# Debian/Ubuntu 的 vixie-cron **不支持 CRON_TZ**（Ubuntu 24.04 的 cron
+# 3.0pl1-184 二进制里没有这个字符串；写了会被静默忽略）。排程一律按服务器本地
+# 时区解释，所以这里像 Windows 那边一样为每个模式设两个触发时刻 —— 美国夏令时
+# 和冬令时各一个，notify.py 的 ET 窗口检查会跳过不匹配当前时制的那一个。
+#
+# 不改服务器全局时区（timedatectl）：同一个 crontab 里可能有别的任务是按现有
+# 本地时区换算过的，改时区会把它们一起推移。
+#
+# 触发时刻由下面的 Python 从 ET 目标时刻反推，不硬编码某个时区。取窗口中段：
+# preview 窗口 ET 10:00-10:45，confirm 窗口 ET 14:45-15:35。
 if [ "$INSTALL_CRON" = 1 ]; then
     say "安装 crontab 条目"
     if ! command -v crontab >/dev/null; then
@@ -69,14 +76,42 @@ if [ "$INSTALL_CRON" = 1 ]; then
     fi
 
     LOG="$BASE_DIR/scans/cron.log"
-    NEW_BLOCK=$(cat <<EOF
-$CRON_MARK  (deploy.sh 生成，勿手改；重跑 deploy.sh 会覆盖本块)
-CRON_TZ=America/New_York
-15 10 * * 1-5 cd $BASE_DIR && $PY notify.py preview >> $LOG 2>&1
-15 15 * * 1-5 cd $BASE_DIR && $PY notify.py confirm >> $LOG 2>&1
-# <<< earnings-iv-scanner
-EOF
-)
+    SCHEDULE=$("$PY" - "$BASE_DIR" "$PY" "$LOG" <<'PYEOF'
+import subprocess, sys
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+base_dir, py, log = sys.argv[1:4]
+ET = ZoneInfo("America/New_York")
+TARGETS = {"preview": (10, 15), "confirm": (15, 15)}   # ET hh:mm,窗口中段
+PROBES = ((2026, 1, 15), (2026, 7, 15))                # 一个冬令时日期 + 一个夏令时日期
+
+tzname = subprocess.run(["timedatectl", "show", "--property=Timezone", "--value"],
+                        capture_output=True, text=True).stdout.strip()
+if not tzname:
+    sys.exit("无法确定服务器时区")
+tz = ZoneInfo(tzname)
+
+for mode, (h, m) in TARGETS.items():
+    variants = {}
+    for y, mo, d in PROBES:
+        loc = datetime(y, mo, d, h, m, tzinfo=ET).astimezone(tz)
+        shift = (loc.date() - datetime(y, mo, d).date()).days
+        variants.setdefault((loc.minute, shift), set()).add(loc.hour)
+    for (minute, shift), hours in sorted(variants.items()):
+        # ET 的周一到周五是 cron 的 1-5；本地时间跨日则整体平移
+        dow = {0: "1-5", 1: "2-6", -1: "0-4"}[shift]
+        hrs = ",".join(str(x) for x in sorted(hours))
+        print(f"# {mode}: ET {h:02d}:{m:02d} -> {tzname} {hrs}:{minute:02d} "
+              f"(两个小时值分别对应美国冬/夏令时,只有一个会真正执行)")
+        print(f"{minute} {hrs} * * {dow} cd {base_dir} && {py} notify.py {mode} >> {log} 2>&1")
+PYEOF
+) || die "推导 cron 触发时刻失败"
+
+    NEW_BLOCK=$(printf '%s\n%s\n%s\n' \
+        "$CRON_MARK  (deploy.sh 生成，勿手改；重跑 deploy.sh 会覆盖本块)" \
+        "$SCHEDULE" \
+        "# <<< earnings-iv-scanner")
     # 先剔掉旧块（如果有），再追加新块，保证不重复
     OLD=$(crontab -l 2>/dev/null || true)
     if [ -n "$OLD" ]; then

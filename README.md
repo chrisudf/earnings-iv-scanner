@@ -123,15 +123,25 @@ bash /root/earnings-iv-scanner/deploy.sh
 (会真发一封邮件)。**幂等**——重复跑不重复装、不重复加 cron 行,改完代码 `git pull`
 后再跑一遍即可。`--no-cron` 只建环境不碰 crontab。
 
-**cron 只需要单触发**,不像 Windows 那边要为夏令时设两个:
+**cron 和 Windows 一样需要双触发**。⚠️ **Debian/Ubuntu 的 vixie-cron 不支持
+`CRON_TZ`**(Ubuntu 24.04 的 cron 3.0pl1-184 二进制里没这个字符串,写了被静默忽略
+—— 2026-08-03-05 踩过这个坑,连续三天所有任务都按服务器本地时间触发、落在 ET 窗口外
+全部跳过,一封信号都没发)。排程只能按服务器本地时区解释。
+
+所以 deploy.sh 从 ET 目标时刻**反推**本地触发时刻,每个模式两个(美国冬/夏令时各一个),
+由 `notify.py` 的 ET 窗口检查跳过不匹配的那个。服务器在布里斯班时算出来是:
 
 ```
-CRON_TZ=America/New_York
-15 10 * * 1-5  ...notify.py preview   # ET 10:15,落在 10:00-10:45 窗口
-15 15 * * 1-5  ...notify.py confirm   # ET 15:15,落在 14:45-15:35 窗口
+15 0,1 * * 2-6  ...notify.py preview   # ET 10:15 = AEST 00:15(夏)/01:15(冬)
+15 5,6 * * 2-6  ...notify.py confirm   # ET 15:15 = AEST 05:15(夏)/06:15(冬)
 ```
 
-`CRON_TZ` 由 Vixie/ISC cron 支持(Ubuntu 默认),夏令时切换由系统时区库处理。
+星期是 `2-6` 而非 `1-5`:ET 周一 10:15 已经是布里斯班周二凌晨,跨了日期,deploy.sh
+会自动平移。换服务器/换时区不用改脚本,重跑 deploy.sh 会按新时区重算。
+
+**不要用 `timedatectl set-timezone` 改全局时区**来"解决"这个问题 —— 同一个 crontab
+里的其他任务可能是按现有本地时区换算过的,改时区会把它们一起推移。
+
 旧 crontab 每次部署自动备份到 `scans/crontab.backup.<时间戳>`。
 
 **迁移注意**:
