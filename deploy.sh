@@ -2,8 +2,9 @@
 #
 # 把扫描器部署到一台 Linux 服务器（DigitalOcean droplet 等）上跑。
 #
-#   bash deploy.sh          # 建 venv、装依赖、装 cron
-#   bash deploy.sh --no-cron # 只建环境，不碰 crontab
+#   bash deploy.sh           # 建 venv、装依赖、装 cron、冒烟测试
+#   bash deploy.sh --no-cron  # 只建环境，不碰 crontab
+#   bash deploy.sh --no-smoke # 跳过冒烟测试（它会真发一封邮件）
 #
 # 幂等：重复跑不会重复装依赖，也不会重复往 crontab 里加行。
 # 前置：仓库已 clone 到本机，notify_config.json 已用 scp 传进来（它在
@@ -15,7 +16,14 @@ VENV="$BASE_DIR/.venv"
 PY="$VENV/bin/python"
 CRON_MARK="# >>> earnings-iv-scanner"   # 用于识别本脚本写过的 cron 块
 INSTALL_CRON=1
-[ "${1:-}" = "--no-cron" ] && INSTALL_CRON=0
+RUN_SMOKE=1
+for arg in "$@"; do
+    case "$arg" in
+        --no-cron)  INSTALL_CRON=0 ;;
+        --no-smoke) RUN_SMOKE=0 ;;
+        *) echo "未知参数: $arg（可用: --no-cron, --no-smoke）" >&2; exit 2 ;;
+    esac
+done
 
 say() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 die() { printf '\n\033[31m错误: %s\033[0m\n' "$*" >&2; exit 1; }
@@ -125,8 +133,12 @@ PYEOF
 fi
 
 # --- 5. 冒烟测试 ------------------------------------------------------------
-say "冒烟测试（--force 跳过 ET 窗口检查，会真的发一封邮件）"
-cd "$BASE_DIR" && "$PY" notify.py confirm --force
+if [ "$RUN_SMOKE" = 1 ]; then
+    say "冒烟测试（--force 跳过 ET 窗口检查，会真的发一封邮件）"
+    cd "$BASE_DIR" && "$PY" notify.py confirm --force
+else
+    say "已跳过冒烟测试（--no-smoke）"
+fi
 
 say "完成。日志：$BASE_DIR/scans/notify_log.txt 和 scans/cron.log"
 echo "确认 droplet 连跑正常后，再到 Windows 上停掉本地任务："
