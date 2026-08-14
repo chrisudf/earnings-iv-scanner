@@ -46,7 +46,7 @@ from email.mime.text import MIMEText
 
 from scanner import (
     BASE_DIR, BNE, COL_ENTRY, ET, ENTRY_ET_HM, SCAN_DIR,
-    build_cn_report, et_moment_to_bne, fmt_bne, is_trading_day,
+    build_cn_report, build_verdict, et_moment_to_bne, fmt_bne, is_trading_day,
     next_trading_day, scan,
 )
 
@@ -198,8 +198,10 @@ def run(mode, force):
     n_con = int((df["tier"] == "CONSIDER").sum())
 
     report = build_cn_report(df, today_et, include_no_data=(mode == "preview"))
+    # Immediately above the list it describes, so it can't be skimmed past.
+    verdict = build_verdict(df, mode)
     body = (header + exit_reminder + ("\n" if exit_reminder else "")
-            + replay_section + report + footer)
+            + replay_section + verdict + report + footer)
     save_report(mode, body)
 
     if mode == "confirm":

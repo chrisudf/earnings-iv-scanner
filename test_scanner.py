@@ -11,9 +11,12 @@ AFTER the announcement).
 """
 from datetime import date
 
+import pandas as pd
+
 from scanner import (
-    PermanentDataError, _parse_mcap, build_term_structure, canon, classify,
-    entry_exit, filter_dates, next_trading_day, prev_trading_day,
+    PermanentDataError, _parse_mcap, build_term_structure, build_verdict,
+    canon, classify, consider_reason, entry_exit, filter_dates,
+    next_trading_day, prev_trading_day,
 )
 
 
@@ -115,6 +118,64 @@ def test_term_structure_clamps_outside_knots():
     assert spline(5) == 0.6
     assert spline(60) == 0.4
     assert abs(spline(27.5) - 0.5) < 1e-9
+
+
+# -- consider_reason / build_verdict ----------------------------------------
+
+def _con(ivrv=1.0, vol=2_000_000, ivrv_ok=False, vol_ok=True, tier="CONSIDER"):
+    return {"tier": tier, "iv30_rv30": ivrv, "avg_volume_30d": vol,
+            "ivrv_ok": ivrv_ok, "vol_ok": vol_ok}
+
+
+def test_consider_reason_shows_distance_to_threshold():
+    # NU on 2026-08-13: a hair under the gate.
+    assert "差 0.028 到 1.25" in consider_reason(_con(ivrv=1.222))
+
+
+def test_consider_reason_marks_inverted_ivrv():
+    # AMAT on 2026-08-13: IV *cheaper* than realized — not "nearly there".
+    out = consider_reason(_con(ivrv=0.69))
+    assert "差 0.56 到 1.25" in out and "已反向" in out
+    # 1.0 is the boundary: at or above it, no inversion warning.
+    assert "已反向" not in consider_reason(_con(ivrv=1.0))
+
+
+def test_consider_reason_volume_gap_in_wan():
+    out = consider_reason(_con(vol=266_689, ivrv_ok=True, vol_ok=False))
+    assert "26.7万" in out and "差 123.3万 到 150万" in out
+
+
+def test_consider_reason_survives_csv_roundtrip_strings():
+    # vol_ok/ivrv_ok come back as strings after a CSV round-trip.
+    r = _con(ivrv=1.222)
+    r["ivrv_ok"], r["vol_ok"] = "False", "True"
+    assert "差 0.028 到 1.25" in consider_reason(r)
+
+
+def test_verdict_silent_when_a_recommendation_exists():
+    df = pd.DataFrame([_con(tier="RECOMMENDED"), _con(ivrv=0.69)])
+    assert build_verdict(df, "confirm") == ""
+
+
+def test_verdict_silent_when_nothing_actionable():
+    assert build_verdict(pd.DataFrame([_con(tier="AVOID")]), "confirm") == ""
+
+
+def test_verdict_flags_all_ivrv_failures():
+    # The 2026-08-13 confirm: 4 CONSIDER, every one failing on iv30/rv30.
+    df = pd.DataFrame([_con(ivrv=v) for v in (1.222, 1.178, 1.041, 0.69)])
+    out = build_verdict(df, "confirm")
+    assert out.startswith("⛔") and "4 只全部倒在" in out
+    # preview is hours before entry, so it must not read as a final verdict.
+    assert "以开仓前的 confirm 班次为准" in build_verdict(df, "preview")
+
+
+def test_verdict_distinguishes_volume_only_and_mixed():
+    vol_only = pd.DataFrame([_con(ivrv_ok=True, vol_ok=False)])
+    assert "成交量不足 150万" in build_verdict(vol_only, "confirm")
+    mixed = pd.DataFrame([_con(ivrv=0.69), _con(ivrv_ok=True, vol_ok=False)])
+    out = build_verdict(mixed, "confirm")
+    assert "1 只 IV 不够贵" in out and "1 只成交量不足" in out
 
 
 def test_replay_grade_bands():
