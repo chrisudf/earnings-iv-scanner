@@ -18,6 +18,13 @@
 | `ts_slope_0_45` | IV 期限结构斜率，近月 → 45 天（财报升水导致的倒挂程度） | ≤ −0.00406 |
 
 **分级**（与原 GUI 一致）：三条全过 = `RECOMMENDED`；斜率过 + 另两条只过一条 = `CONSIDER`；其余 = `AVOID`。
+斜率是**硬性必过项**——斜率不过,另两条再好也是 `AVOID`。
+
+`CONSIDER` 混了两种完全不同的情况,邮件里会直接标出是哪条没过：
+- `← IV 不够贵(策略核心边缘缺失)`：IV 相对已实现波动并不贵,卖近月没有优势
+  （实例：IBM iv30/rv30=0.53,隐含波动率只有已实现的一半）——**根本没肉**
+- `← 成交量不足(边缘在但可能难成交)`：IV 确实贵但流动性不够
+  （实例：FR iv30/rv30=2.07 但均量仅 126 万）——**有肉但难吃到**
 
 **开平仓时机**：
 - 开仓：财报公布前最后一个交易日，收盘前约 15 分钟（ET 15:45）
@@ -85,7 +92,67 @@ Preview 不能再早:Yahoo 期权报价延迟 15 分钟,开盘后约 30 分钟�
 **注意**:电脑需处于开机或睡眠状态(任务已设置"唤醒运行"+"错过后尽快补跑";
 补跑时若已错过 ET 窗口会自动跳过,不会发过期信号)。运行日志在 `scans/notify_log.txt`。
 
+两个班次在窗口内运行时**一定会发邮件**(有信号/无信号/出错都发):早晨没收到
+邮件只有一个含义——任务没跑(电脑睡死/错过窗口),不存在"没信号所以没发"。
+Preview 邮件开头附**昨日信号自动复盘**(以真实 ET 09:45 出场价评分,含累计统计),
+原始扫描结果与复盘明细存 `scans/{preview,confirm}_日期.csv` 和 `scans/replay_log.csv`。
+
 手动测试:`python notify.py confirm --force`(跳过时段检查)。
+
+## 部署到 Linux 服务器(deploy.sh)
+
+跑在 droplet 上就不用担心笔记本睡死漏掉信号。两条命令(把分支名和 IP 换成实际的):
+
+```bash
+git clone -b feat/refactor https://github.com/chrisudf/earnings-iv-scanner.git /root/earnings-iv-scanner
+```
+
+`notify_config.json` 在 `.gitignore` 里,不会跟着 git 走,要从本地单独传(在**本地**机器上跑):
+
+```bash
+scp notify_config.json root@<droplet-ip>:/root/earnings-iv-scanner/
+```
+
+然后在服务器上:
+
+```bash
+bash /root/earnings-iv-scanner/deploy.sh
+```
+
+`deploy.sh` 会建 venv、装依赖、校验邮件配置、写 crontab、最后 `--force` 跑一次冒烟测试
+(会真发一封邮件)。**幂等**——重复跑不重复装、不重复加 cron 行,改完代码 `git pull`
+后再跑一遍即可。`--no-cron` 只建环境不碰 crontab。
+
+**cron 和 Windows 一样需要双触发**。⚠️ **Debian/Ubuntu 的 vixie-cron 不支持
+`CRON_TZ`**(Ubuntu 24.04 的 cron 3.0pl1-184 二进制里没这个字符串,写了被静默忽略
+—— 2026-08-03-05 踩过这个坑,连续三天所有任务都按服务器本地时间触发、落在 ET 窗口外
+全部跳过,一封信号都没发)。排程只能按服务器本地时区解释。
+
+所以 deploy.sh 从 ET 目标时刻**反推**本地触发时刻,每个模式两个(美国冬/夏令时各一个),
+由 `notify.py` 的 ET 窗口检查跳过不匹配的那个。服务器在布里斯班时算出来是:
+
+```
+15 0,1 * * 2-6  ...notify.py preview   # ET 10:15 = AEST 00:15(夏)/01:15(冬)
+15 5,6 * * 2-6  ...notify.py confirm   # ET 15:15 = AEST 05:15(夏)/06:15(冬)
+```
+
+星期是 `2-6` 而非 `1-5`:ET 周一 10:15 已经是布里斯班周二凌晨,跨了日期,deploy.sh
+会自动平移。换服务器/换时区不用改脚本,重跑 deploy.sh 会按新时区重算。
+
+**不要用 `timedatectl set-timezone` 改全局时区**来"解决"这个问题 —— 同一个 crontab
+里的其他任务可能是按现有本地时区换算过的,改时区会把它们一起推移。
+
+旧 crontab 每次部署自动备份到 `scans/crontab.backup.<时间戳>`。
+
+**迁移注意**:
+
+- 别长期两边同时开——同一封信收两遍,而且 `scans/replay_log.csv` 的累计复盘统计
+  会在两台机器上各记一份、互相对不上。建议并行一天做对照,确认服务器信号与本地
+  一致后再 `Disable-ScheduledTask -TaskName EarningsIV-Preview`(和 `-Confirm`)。
+- 服务器 IP 在数据中心机房,Yahoo 的限速表现可能和家用宽带不同。首次冒烟测试若出现
+  大批 `NO_DATA` 或超时,那是 IP 被限速而非代码问题。
+- 服务器日志:`scans/notify_log.txt`(脚本自己的)和 `scans/cron.log`(cron 捕获的
+  stdout/stderr,含 traceback)。
 
 ## 数据源
 
@@ -94,9 +161,18 @@ Preview 不能再早:Yahoo 期权报价延迟 15 分钟,开盘后约 30 分钟�
 - 财报日期交叉核对：yfinance `Ticker.calendar`（不一致时输出 `MISMATCH`，务必人工确认）
 - 期权链 / 历史价格：yfinance（Yahoo 数据有 15 分钟延迟）
 
-## 已知局限
+## 已知局限与风险
 
-- 交易日推算只跳过周末，未处理美股节假日（节假日前后自行核对开平仓日）。
-- Nasdaq 日历偶尔有公司改期不及时；`earnings_check` 列为 MISMATCH 的票不要交易。
+- 交易日推算内置 2026–27 年 NYSE 全日休市表（`scanner.py` 的 `NYSE_HOLIDAYS`,
+  **每年更新一次**）；早收盘半日（感恩节次日等）未建模。
+- Nasdaq 日历偶尔有公司改期不及时；`earnings_check` 为 MISMATCH 或 n/a 的票
+  **人工确认日期后再交易**（yfinance 也可能是错的一方——2026-07-15 ASML 就是
+  yf 错、Nasdaq 对，不要无条件信任任何一边）。
+- **AMC 当晚被行权风险**：期权行权截止（OCC ~17:30 ET）在盘后财报公布**之后**。
+  15:45 卖出的 ATM call，若 16:05 股价大幅跳涨，可能**当晚就被行权**——你在
+  布里斯班睡觉，醒来时持有 short stock（远月 long call 做 cover，但 IBKR 的
+  保证金/强平机制需提前了解）。09:45 出场避开的是 pin risk，避不开这个。
 - yfinance 非官方 API，Yahoo 改版可能导致失效。
 - 筛选指标是"扫描时刻"的快照，不等于开仓时刻的值——下单前重跑确认。
+- 信号带 `⚠ 数据/结构标记`（ZERO_BID/WIDE_SPREAD/IV_DIVERGENCE 等）的票要
+  格外谨慎：这些标记专抓"指标看着漂亮、期权链根本不可交易"的情况（如 WIT）。

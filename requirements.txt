@@ -1,6 +1,11 @@
-yfinance>=1.5
-numpy>=2.1
-scipy>=1.15
-pandas>=2.2
-requests>=2.31
-lxml>=5.0
+# Floor+ceiling bounds: this runs unattended via Task Scheduler — an
+# uncontrolled major-version jump (especially yfinance, an unofficial
+# scraper) can silently break the morning signal. For exact
+# reproducibility, `pip freeze > requirements.lock` on the machine that
+# runs the scheduled tasks and install from that.
+yfinance>=1.5,<2
+numpy>=2.1,<3
+scipy>=1.15,<2
+pandas>=2.2,<4
+requests>=2.31,<3
+lxml>=5.0,<7

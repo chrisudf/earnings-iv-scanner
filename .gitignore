@@ -4,3 +4,5 @@ __pycache__/
 .DS_Store
 notify_config.json
 scans/
+# Runtime-regenerated weekly; untrack with: git rm --cached russell1000_cache.json
+russell1000_cache.json
