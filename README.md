@@ -165,6 +165,49 @@ bash /root/earnings-iv-scanner/deploy.sh
 - 服务器日志:`scans/notify_log.txt`(脚本自己的)和 `scans/cron.log`(cron 捕获的
   stdout/stderr,含 traceback)。
 
+### ⚠️ DigitalOcean 封了出网 SMTP 端口(2026-08-18 起)
+
+**症状**:cron 按点触发了、扫描跑完了、报告也存进 `scans/` 了,但一封邮件都没有。
+`scans/notify_log.txt` 里是:
+
+```
+File "notify.py", line 99, in send_email
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30) as s:
+OSError: [Errno 101] Network is unreachable
+[... BNE / ... ET] 错误邮件也发送失败
+```
+
+最后那行是关键——连报错通知本身也发不出去,所以外部**完全静默**,不会有任何提示。
+
+**病因**:droplet 的出网 25 / 465 / 587 端口被 DigitalOcean 在网络层封了,不是代码、
+不是 Gmail 应用专用密码过期。在 droplet 上强制 IPv4 实测:
+
+| 目标 | 结果 |
+| --- | --- |
+| smtp.gmail.com:25 / 465 / 587 | 超时 |
+| smtp.mail.yahoo.com:465 | 超时 |
+| smtp.qq.com:465 | 超时 |
+| smtp.office365.com:587 | 超时 |
+| www.google.com:443 | OK |
+| query1.finance.yahoo.com:443 | OK |
+| api.resend.com:443 | OK |
+
+**所有**服务商的 SMTP 端口全挂而 443 完好 → 端口级封锁。DO 默认对账号封 outbound
+SMTP,需开工单申请解封(批得慢且常被拒)。
+
+已排除的:`ufw inactive`;`iptables OUTPUT` policy ACCEPT;nftables 里只有 Docker
+规则,没有拦出网的;机器没重启(up 162 天);cron 服务 active、crontab 条目也在。
+
+**排查时注意报错会指错方向**:droplet 只有 link-local 的 IPv6、没有全局 v6 地址,
+而 `smtp.gmail.com` 有 AAAA 记录。`socket.create_connection` 会先试 IPv6 立即拿到
+`Network is unreachable`,再试 IPv4 静默超时,最后 `raise exceptions[0]` 抛出**第一个**
+异常。所以你看到的是 IPv6 的错,真正的病因是 IPv4 那条路上端口被封。别去修 IPv6。
+
+**时间线**:2026-08-15 05:15 最后一次发信成功 → 2026-08-18 00:15 第一次失败,周末期间
+DO 侧生效。
+
+**修法**:改走 HTTPS 邮件 API(443 通),见上面「自动运行 + 邮件信号」一节。
+
 ## 数据源
 
 - 成分股：Wikipedia "Russell 1000 Index"（iShares IWB 有反爬墙，不可用）
