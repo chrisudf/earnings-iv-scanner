@@ -1,5 +1,10 @@
 {
+  "_comment": "服务器上用 resend_api_key(HTTPS 443);DigitalOcean 封了出网 SMTP。Windows 本地两种都行。",
+  "resend_api_key": "re_xxxxxxxx",
+  "mail_from": "onboarding@resend.dev",
+  "send_to": "you@gmail.com",
+
+  "_smtp_fallback": "没有 resend_api_key 时回退到 Gmail SMTP:",
   "gmail_user": "you@gmail.com",
-  "gmail_app_password": "",
-  "send_to": "you@gmail.com"
+  "gmail_app_password": ""
 }
