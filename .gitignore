@@ -6,3 +6,6 @@ notify_config.json
 scans/
 # Runtime-regenerated weekly; untrack with: git rm --cached russell1000_cache.json
 russell1000_cache.json
+
+# 配置的任何备份/变体都不许进 git(里面是明文凭据)
+notify_config.json*

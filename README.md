@@ -217,9 +217,14 @@ SMTP,需开工单申请解封(批得慢且常被拒)。
 规则,没有拦出网的;机器没重启(up 162 天);cron 服务 active、crontab 条目也在。
 
 **排查时注意报错会指错方向**:droplet 只有 link-local 的 IPv6、没有全局 v6 地址,
-而 `smtp.gmail.com` 有 AAAA 记录。`socket.create_connection` 会先试 IPv6 立即拿到
-`Network is unreachable`,再试 IPv4 静默超时,最后 `raise exceptions[0]` 抛出**第一个**
-异常。所以你看到的是 IPv6 的错,真正的病因是 IPv4 那条路上端口被封。别去修 IPv6。
+而 `smtp.gmail.com` 有 AAAA 记录。`socket.create_connection` 会遍历 getaddrinfo 返回的
+每个地址,而 `all_errors=False`(默认)时它**每失败一次就 `exceptions.clear()` 再 append**
+——CPython 源码里那行注释写得很直白:`# raise only the last error`。所以结尾的
+`raise exceptions[0]` 抛出的是**最后一个**地址的错误,不是第一个。
+
+后果:IPv6 排在尝试顺序的最后,它那句瞬间返回的 `Network is unreachable` 盖掉了前面
+IPv4 静默超时 30 秒这个真相,而超时才是真正的病因。**不要用这句报错去推断先试了谁**,
+也别去修 IPv6;判断依据只能是上面那张分协议族逐端口的实测表。
 
 **时间线**:2026-08-15 05:15 最后一次发信成功 → 2026-08-18 00:15 第一次失败,周末期间
 DO 侧生效。

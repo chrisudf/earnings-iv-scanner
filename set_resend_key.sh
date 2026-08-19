@@ -15,7 +15,14 @@ case "$RESEND_KEY" in
     *) echo "警告: key 不是 re_ 开头,继续但请确认没粘错" >&2 ;;
 esac
 
-cp -p "$CONFIG" "$CONFIG.bak.$(date +%F-%H%M)"
+# 备份写到仓库**外面**:.gitignore 只挡 notify_config.json 这个确切文件名,
+# 放在仓库里的 .bak 会以 untracked 出现,一个 git add -A 就把凭据提交进去了。
+# 用 umask 而非 cp -p —— cp -p 会原样保留源文件可能过宽的权限位。
+BACKUP_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/earnings-iv-scanner"
+mkdir -p "$BACKUP_DIR" && chmod 700 "$BACKUP_DIR"
+BACKUP="$BACKUP_DIR/notify_config.json.bak.$(date +%F-%H%M%S)"
+(umask 077 && cat "$CONFIG" > "$BACKUP")
+echo "已备份原配置到 $BACKUP"
 RESEND_KEY="$RESEND_KEY" python3 - "$CONFIG" <<'PY'
 import json, os, sys
 p = sys.argv[1]
