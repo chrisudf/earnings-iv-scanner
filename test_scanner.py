@@ -191,6 +191,49 @@ def test_report_explains_a_missing_expected_move():
     assert "预期波动=7.08%" in out
 
 
+def test_replay_report_renders_a_missing_expected_move_as_unknown():
+    """The end-to-end path grade(NaN) alone does not cover.
+
+    build_replay_report() normalises a NaN expected move to None. Drop that
+    and grade() still returns ❓ (it guards non-finite), but `em_txt` at
+    replay.py:128 is `f"{em}%" if em else "?(EM缺失)"` — and NaN is truthy,
+    so the replay block goes back to saying "预期nan%" and a non-finite
+    em_pct lands in replay_log.csv.
+    """
+    import pathlib
+    import tempfile
+
+    import replay
+
+    rows = pd.DataFrame([{
+        "symbol": "YMM", "tier": "RECOMMENDED", "timing": "BMO",
+        COL_ENTRY: "2026-08-18", COL_EXIT: "2026-08-19",
+        "expected_move_pct": float("nan"),   # ZERO_BID name
+        "flags": "ZERO_BID|LOW_OI", "front_dte": 3,
+    }])
+    tmp = pathlib.Path(tempfile.mkdtemp())
+    saved = (replay._signals_exiting, replay._real_prices,
+             replay.SCAN_DIR, replay.REPLAY_LOG)
+    try:
+        replay._signals_exiting = lambda _today: rows
+        replay._real_prices = lambda *_a: (100.0, 103.2, 103.2)
+        replay.SCAN_DIR = tmp
+        replay.REPLAY_LOG = tmp / "replay_log.csv"
+        out = replay.build_replay_report(date(2026, 8, 19))
+        logged = pd.read_csv(tmp / "replay_log.csv")
+    finally:
+        (replay._signals_exiting, replay._real_prices,
+         replay.SCAN_DIR, replay.REPLAY_LOG) = saved
+
+    assert "nan" not in out.lower(), out
+    assert "?(EM缺失)" in out, out
+    # ❓ twice: once on the signal line, once in the cumulative tally.
+    assert "❓ YMM [RECOMMENDED]" in out, out
+    assert "❓1" in out, out
+    assert pd.isna(logged["em_pct"].iloc[0]) and pd.isna(logged["ratio"].iloc[0])
+    assert logged["grade"].iloc[0] == "❓"
+
+
 def test_verdict_silent_when_only_avoid_rows():
     # README used to say the verdict appears whenever recommendations are 0;
     # it is also silent when nothing reached CONSIDER either.

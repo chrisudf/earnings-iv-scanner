@@ -725,7 +725,8 @@ def build_cn_report(df, today_et, include_no_data=True):
         lines.append(f"  开仓: 布里斯班 {fmt_bne(entry_bne)}{entry_flag}")
         lines.append(f"  平仓: 布里斯班 {fmt_bne(exit_bne)}")
         if r["tier"] != "NO_DATA":
-            # straddle 只在四条腿都有正的双边报价时才计算(见 :328)。拿不到时
+            # straddle 只在前月 ATM 的看涨/看跌**两条**腿、共四个买卖报价全为正时
+            # 才计算(见 :317-331)——四个是报价数不是腿数,后月报价不参与。拿不到时
             # expected_move_pct 是 None,进 DataFrame 变 NaN,直接插值会渲染成
             # 「预期波动=nan%」—— 看着像算错了,其实是本模块拒绝用 ask/2 造价。
             em = r["expected_move_pct"]
