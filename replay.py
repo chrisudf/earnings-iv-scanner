@@ -17,6 +17,7 @@ outcomes for the rows the filter would have excluded, otherwise the sample
 is survivorship-biased. NO_DATA / missing-EM rows are logged as censored (❓).
 """
 
+import math
 from datetime import timedelta
 
 import pandas as pd
@@ -31,7 +32,11 @@ GRADE_BANDS = [(0.5, "✅"), (0.85, "🟢"), (1.15, "🟠")]  # above the last -
 
 
 def grade(ratio):
-    if ratio is None:
+    # NaN is truthy and compares False against every cutoff, so an unguarded
+    # NaN falls through to 🔴 — the worst grade, awarded on no data at all.
+    # It reaches here whenever expected_move_pct was NaN (ZERO_BID names, see
+    # scanner.py:328) and would silently skew the cumulative replay stats.
+    if ratio is None or not math.isfinite(ratio):
         return "❓"
     for cutoff, emoji in GRADE_BANDS:
         if ratio <= cutoff:
@@ -100,6 +105,8 @@ def build_replay_report(today_et):
             em = float(r["expected_move_pct"])
         except (KeyError, TypeError, ValueError):
             em = None
+        if em is not None and not math.isfinite(em):
+            em = None      # None in a float column arrives here as NaN
         rec["em_pct"] = em
         try:
             entry_close, exit_open, px_0945 = _real_prices(
