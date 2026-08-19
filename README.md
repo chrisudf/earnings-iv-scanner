@@ -20,11 +20,22 @@
 **分级**（与原 GUI 一致）：三条全过 = `RECOMMENDED`；斜率过 + 另两条只过一条 = `CONSIDER`；其余 = `AVOID`。
 斜率是**硬性必过项**——斜率不过,另两条再好也是 `AVOID`。
 
-`CONSIDER` 混了两种完全不同的情况,邮件里会直接标出是哪条没过：
-- `← IV 不够贵(策略核心边缘缺失)`：IV 相对已实现波动并不贵,卖近月没有优势
-  （实例：IBM iv30/rv30=0.53,隐含波动率只有已实现的一半）——**根本没肉**
-- `← 成交量不足(边缘在但可能难成交)`：IV 确实贵但流动性不够
-  （实例：FR iv30/rv30=2.07 但均量仅 126 万）——**有肉但难吃到**
+`CONSIDER` 混了两种完全不同的情况,邮件里会直接标出是哪条没过**以及差多远**：
+- `← IV 不够贵(策略核心边缘缺失): 1.222，差 0.028 到 1.25`：IV 相对已实现波动
+  并不贵,卖近月没有优势——**根本没肉**
+- `← IV 不够贵...: 0.69，差 0.56 到 1.25，已反向(IV 比已实现波动还便宜)`：
+  iv30/rv30 < 1.0 时额外标注。这不是"就差一点",是**反过来了**
+- `← 成交量不足(边缘在但可能难成交): 26.7万，差 123.3万 到 150万`：IV 确实贵
+  但流动性不够——**有肉但难吃到**
+
+差距必须显示出来:2026-08-13 的 confirm 里 NU(1.222,差 0.028)和 AMAT(0.69,反向)
+渲染成了一模一样的「🟡 可考虑 ← IV 不够贵」,而这两者根本不是一回事。
+
+**结论行**:当推荐=0 时,信号列表顶部会加一句结论,例如
+`⛔ 结论: 无符合策略的标的。下列 4 只全部倒在「IV 不够贵」...`。
+理由是四条 🟡 可考虑 排在一起,凌晨五点扫一眼极易读成"有 4 个候选可以下单",
+而正确读法是"今晚没有符合策略的标的"。有任何推荐标的时这行静默(逐条信息已经够了);
+preview 班次会附加"距开仓还有数小时,以 confirm 班次为准",因为它不是最终判断。
 
 **开平仓时机**：
 - 开仓：财报公布前最后一个交易日，收盘前约 15 分钟（ET 15:45）
@@ -86,8 +97,26 @@ Preview 不能再早:Yahoo 期权报价延迟 15 分钟,开盘后约 30 分钟�
 (夏令时 05:45,冬令时 06:45,= ET 15:45)手动下单 ATM 日历价差 → 当晚 23:45(冬令时
 00:45,= ET 09:45)平仓;Preview 邮件里附平仓安全网提醒(它比平仓时刻晚半小时到)。
 
-**邮件配置**(一次性):去 https://myaccount.google.com/apppasswords 生成 Gmail
-应用专用密码,填进 `notify_config.json` 的 `gmail_app_password`。不填则只存本地文件不发邮件。
+**邮件配置**(一次性)。`notify_config.json` 支持两种发信通道,有 `resend_api_key`
+就走它,否则回退 Gmail SMTP:
+
+```json
+{
+  "resend_api_key": "re_xxxxxxxx",
+  "mail_from": "onboarding@resend.dev",
+  "send_to": "you@gmail.com"
+}
+```
+
+- **Resend(HTTPS 443,服务器上必须用这个)**:去 https://resend.com 注册,
+  注册邮箱要和 `send_to` 一致,拿 API key 填进 `resend_api_key`。`mail_from` 不填
+  默认用 `onboarding@resend.dev`(Resend 的公共发件地址,不需要你有域名)。
+  ⚠️ 免费版未验证域名时**只能发给注册账号的那个邮箱**——单收件人正好够用,
+  以后要加第二个收件人就得验证一个自有域名、并把 `mail_from` 换成该域名下的地址。
+- **Gmail SMTP(端口 465)**:去 https://myaccount.google.com/apppasswords 生成应用
+  专用密码填 `gmail_app_password`。Windows 本地可用;**droplet 上不通**(见下文 DO 封端口)。
+
+`send_to` 可以写成逗号分隔的多个地址。两个都不配则只存本地文件不发邮件。
 
 **注意**:电脑需处于开机或睡眠状态(任务已设置"唤醒运行"+"错过后尽快补跑";
 补跑时若已错过 ET 窗口会自动跳过,不会发过期信号)。运行日志在 `scans/notify_log.txt`。
@@ -153,6 +182,71 @@ bash /root/earnings-iv-scanner/deploy.sh
   大批 `NO_DATA` 或超时,那是 IP 被限速而非代码问题。
 - 服务器日志:`scans/notify_log.txt`(脚本自己的)和 `scans/cron.log`(cron 捕获的
   stdout/stderr,含 traceback)。
+
+### ⚠️ DigitalOcean 封了出网 SMTP 端口(2026-08-18 起)
+
+**症状**:cron 按点触发了、扫描跑完了、报告也存进 `scans/` 了,但一封邮件都没有。
+`scans/notify_log.txt` 里是:
+
+```
+File "notify.py", line 99, in send_email
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30) as s:
+OSError: [Errno 101] Network is unreachable
+[... BNE / ... ET] 错误邮件也发送失败
+```
+
+最后那行是关键——连报错通知本身也发不出去,所以外部**完全静默**,不会有任何提示。
+
+**病因**:droplet 的出网 25 / 465 / 587 端口被 DigitalOcean 在网络层封了,不是代码、
+不是 Gmail 应用专用密码过期。在 droplet 上强制 IPv4 实测:
+
+| 目标 | 结果 |
+| --- | --- |
+| smtp.gmail.com:25 / 465 / 587 | 超时 |
+| smtp.mail.yahoo.com:465 | 超时 |
+| smtp.qq.com:465 | 超时 |
+| smtp.office365.com:587 | 超时 |
+| www.google.com:443 | OK |
+| query1.finance.yahoo.com:443 | OK |
+| api.resend.com:443 | OK |
+
+**所有**服务商的 SMTP 端口全挂而 443 完好 → 端口级封锁。DO 默认对账号封 outbound
+SMTP,需开工单申请解封(批得慢且常被拒)。
+
+已排除的:`ufw inactive`;`iptables OUTPUT` policy ACCEPT;nftables 里只有 Docker
+规则,没有拦出网的;机器没重启(up 162 天);cron 服务 active、crontab 条目也在。
+
+**排查时注意报错会指错方向**:droplet 只有 link-local 的 IPv6、没有全局 v6 地址,
+而 `smtp.gmail.com` 有 AAAA 记录。`socket.create_connection` 会遍历 getaddrinfo 返回的
+每个地址,而 `all_errors=False`(默认)时它**每失败一次就 `exceptions.clear()` 再 append**
+——CPython 源码里那行注释写得很直白:`# raise only the last error`。所以结尾的
+`raise exceptions[0]` 抛出的是**最后一个**地址的错误,不是第一个。
+
+后果:IPv6 排在尝试顺序的最后,它那句瞬间返回的 `Network is unreachable` 盖掉了前面
+IPv4 静默超时 30 秒这个真相,而超时才是真正的病因。**不要用这句报错去推断先试了谁**,
+也别去修 IPv6;判断依据只能是上面那张分协议族逐端口的实测表。
+
+**时间线**:2026-08-15 05:15 最后一次发信成功 → 2026-08-18 00:15 第一次失败,周末期间
+DO 侧生效。
+
+**修法**:改走 Resend 的 HTTPS API(443 通)。`notify.py` 的 `send_email()` 已按
+`resend_api_key` 是否存在自动选通道,只需在 droplet 上把 key 写进 `notify_config.json`:
+
+```bash
+python3 - <<'EOF'
+import json, pathlib
+p = pathlib.Path("/root/earnings-iv-scanner/notify_config.json")
+c = json.loads(p.read_text())
+c["resend_api_key"] = "re_xxxxxxxx"     # 换成你的
+c["mail_from"] = "onboarding@resend.dev"
+p.write_text(json.dumps(c, indent=2))
+EOF
+chmod 600 /root/earnings-iv-scanner/notify_config.json
+cd /root/earnings-iv-scanner && .venv/bin/python notify.py confirm --force   # 冒烟,会真发一封
+```
+
+`deploy.sh` 的配置校验也会拦下"服务器上只配了 Gmail SMTP"这种情况并给出提示。
+不改 crontab、不改窗口逻辑——坏的只有最后一步发信。
 
 ## 数据源
 

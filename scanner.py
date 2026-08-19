@@ -611,21 +611,81 @@ def _is_true(v):
     return str(v).strip().lower() in ("true", "1")
 
 
+def _fmt_wan(x):
+    """Volume in 万 (10k) — 1_779_053 -> '177.9万', 1_500_000 -> '150万'."""
+    v = x / 10_000
+    return f"{v:.0f}万" if abs(v - round(v)) < 0.05 else f"{v:.1f}万"
+
+
 def consider_reason(r):
-    """Which half of the CONSIDER test failed.
+    """Which half of the CONSIDER test failed, and by how much.
 
     CONSIDER hides two very different situations: IV that isn't actually rich
     (the strategy's whole edge is absent — e.g. IBM at iv30/rv30 0.53) versus
     an edge that's there but sits in a thin name you may not be able to fill.
     The tier alone can't be acted on without knowing which one it is.
+
+    The distance to the threshold matters as much as which one failed: on
+    2026-08-13 NU (1.222, a hair under 1.25) and AMAT (0.69, IV *cheaper*
+    than realized vol — the inverse of the setup) rendered identically as
+    "🟡 可考虑 ← IV 不够贵". They are not the same situation.
     """
     if r.get("tier") != "CONSIDER" or "ivrv_ok" not in r or "vol_ok" not in r:
         return ""
     if not _is_true(r["ivrv_ok"]):
-        return "  ← IV 不够贵(策略核心边缘缺失)"
+        try:
+            ivrv = float(r["iv30_rv30"])
+        except (KeyError, TypeError, ValueError):
+            return "  ← IV 不够贵(策略核心边缘缺失)"
+        gap = MIN_IV30_RV30 - ivrv
+        # Below 1.0 is not "nearly there" — implied is cheaper than realized,
+        # so the short front leg is being sold at a discount, not a premium.
+        inverted = "，已反向(IV 比已实现波动还便宜)" if ivrv < 1.0 else ""
+        return (f"  ← IV 不够贵(策略核心边缘缺失): {ivrv:g}，"
+                f"差 {gap:.3g} 到 {MIN_IV30_RV30}{inverted}")
     if not _is_true(r["vol_ok"]):
-        return "  ← 成交量不足(边缘在但可能难成交)"
+        try:
+            vol = float(r["avg_volume_30d"])
+        except (KeyError, TypeError, ValueError):
+            return "  ← 成交量不足(边缘在但可能难成交)"
+        return (f"  ← 成交量不足(边缘在但可能难成交): {_fmt_wan(vol)}，"
+                f"差 {_fmt_wan(MIN_AVG_VOLUME - vol)} 到 {_fmt_wan(MIN_AVG_VOLUME)}")
     return ""
+
+
+def build_verdict(df, mode="confirm"):
+    """One-line bottom line to head the signal list. '' when not needed.
+
+    Four 🟡 可考虑 blocks read like four things to do. When every one of them
+    failed on iv30/rv30, the honest summary is "nothing here" — by the
+    strategy's own logic a name whose IV isn't rich has no edge to harvest,
+    however inverted its term structure looks. Skimming that at 05:15 and
+    reading "4 candidates" is the failure mode this prevents.
+
+    Silent when at least one RECOMMENDED name exists: the per-name blocks
+    already carry the message there.
+    """
+    rows = df[df["tier"].isin(["RECOMMENDED", "CONSIDER"])]
+    if rows.empty or int((rows["tier"] == "RECOMMENDED").sum()):
+        return ""
+
+    n = len(rows)
+    n_ivrv = sum(1 for _, r in rows.iterrows() if not _is_true(r.get("ivrv_ok", True)))
+    n_vol = n - n_ivrv
+    # preview is a heads-up hours before entry; only confirm is a verdict.
+    tail = ("" if mode == "confirm"
+            else "  (距开仓还有数小时,以开仓前的 confirm 班次为准)")
+
+    if n_vol == 0:
+        head = (f"⛔ 结论: 无符合策略的标的。下列 {n} 只全部倒在「IV 不够贵」"
+                f"(iv30/rv30 < {MIN_IV30_RV30}),策略的核心边缘不存在。")
+    elif n_ivrv == 0:
+        head = (f"⚠ 结论: 无推荐标的。下列 {n} 只 IV 边缘尚在,但成交量不足 "
+                f"{_fmt_wan(MIN_AVG_VOLUME)},可能难以成交。")
+    else:
+        head = (f"⚠ 结论: 无推荐标的。下列 {n} 只中,{n_ivrv} 只 IV 不够贵"
+                f"(核心边缘缺失)、{n_vol} 只成交量不足。")
+    return head + tail + "\n\n"
 
 
 def build_cn_report(df, today_et, include_no_data=True):

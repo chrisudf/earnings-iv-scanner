@@ -30,9 +30,17 @@ Usage:
 
 --force skips the ET-window/weekday gate (for manual testing).
 
-Email config: notify_config.json next to this file:
+Email config: notify_config.json next to this file. Two transports, tried
+in this order:
+
+  Resend HTTPS API (preferred — DigitalOcean blocks outbound SMTP on the
+  droplet, see README):
+    {"resend_api_key": "re_...", "send_to": "...",
+     "mail_from": "onboarding@resend.dev"}
+  Gmail SMTP (still fine on Windows / anywhere port 465 is open):
     {"gmail_user": "...", "gmail_app_password": "...", "send_to": "..."}
-Leave gmail_app_password empty to skip email (reports still saved to scans/).
+
+Configure neither and email is skipped (reports still saved to scans/).
 """
 
 import argparse
@@ -44,13 +52,21 @@ from datetime import datetime, time as dtime
 from email.header import Header
 from email.mime.text import MIMEText
 
+import requests
+
 from scanner import (
     BASE_DIR, BNE, COL_ENTRY, ET, ENTRY_ET_HM, SCAN_DIR,
-    build_cn_report, et_moment_to_bne, fmt_bne, is_trading_day,
+    build_cn_report, build_verdict, et_moment_to_bne, fmt_bne, is_trading_day,
     next_trading_day, scan,
 )
 
 CONFIG_PATH = BASE_DIR / "notify_config.json"
+RESEND_ENDPOINT = "https://api.resend.com/emails"
+# Resend's shared sender, usable without owning a domain. On the free tier an
+# unverified account may only send TO the address it registered with, which is
+# exactly our single recipient; adding a second recipient needs a verified
+# domain and a mail_from on it.
+DEFAULT_MAIL_FROM = "onboarding@resend.dev"
 LOG_PATH = BASE_DIR / "scans" / "notify_log.txt"
 
 # ET windows chosen so that, of the two scheduled Brisbane firings per mode,
@@ -81,25 +97,64 @@ def load_config():
     except ValueError as e:
         log(f"notify_config.json 解析失败({e}),视为未配置邮件")
         return None
-    if cfg.get("gmail_user") and cfg.get("gmail_app_password"):
+    if cfg.get("resend_api_key"):
+        cfg.setdefault("mail_from", DEFAULT_MAIL_FROM)
+        cfg.setdefault("send_to", cfg.get("gmail_user"))
+    elif cfg.get("gmail_user") and cfg.get("gmail_app_password"):
+        cfg.setdefault("mail_from", cfg["gmail_user"])
         cfg.setdefault("send_to", cfg["gmail_user"])
-        return cfg
-    return None
+    else:
+        return None
+    if not cfg.get("send_to"):
+        log("notify_config.json 有传输配置但缺 send_to,无法发信")
+        return None
+    return cfg
+
+
+def recipients(cfg):
+    return [a.strip() for a in cfg["send_to"].split(",") if a.strip()]
+
+
+def _send_via_resend(cfg, subject, body):
+    """HTTPS on 443 — the only path out of the droplet since DO's SMTP block."""
+    r = requests.post(
+        RESEND_ENDPOINT,
+        headers={"Authorization": f"Bearer {cfg['resend_api_key']}"},
+        json={"from": cfg["mail_from"], "to": recipients(cfg),
+              "subject": subject, "text": body},
+        timeout=30,
+    )
+    if not r.ok:
+        # Resend states the actual reason in the body (an unverified-sender or
+        # off-account recipient rejection is a 403 that says which); bubbling
+        # up only raise_for_status()'s "403 Client Error" would hide it.
+        raise RuntimeError(
+            f"Resend 发信失败 HTTP {r.status_code}: {r.text[:500]}")
+
+
+def _send_via_smtp(cfg, subject, body):
+    msg = MIMEText(body, "plain", "utf-8")
+    msg["Subject"] = str(Header(subject, "utf-8"))
+    msg["From"] = cfg["mail_from"]
+    msg["To"] = cfg["send_to"]
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30) as s:
+        s.login(cfg["gmail_user"], cfg["gmail_app_password"])
+        s.sendmail(cfg["gmail_user"], recipients(cfg), msg.as_string())
 
 
 def send_email(subject, body):
     cfg = load_config()
     if not cfg:
-        log("邮件未配置(notify_config.json 缺 app password),仅保存本地文件")
+        log("邮件未配置(notify_config.json 缺 resend_api_key,也缺 Gmail 应用"
+            "专用密码),仅保存本地文件")
         return False
-    msg = MIMEText(body, "plain", "utf-8")
-    msg["Subject"] = str(Header(subject, "utf-8"))
-    msg["From"] = cfg["gmail_user"]
-    msg["To"] = cfg["send_to"]
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30) as s:
-        s.login(cfg["gmail_user"], cfg["gmail_app_password"])
-        s.sendmail(cfg["gmail_user"], [cfg["send_to"]], msg.as_string())
-    log(f"邮件已发送: {subject}")
+    if cfg.get("resend_api_key"):
+        _send_via_resend(cfg, subject, body)
+        via = "Resend API"
+    else:
+        _send_via_smtp(cfg, subject, body)
+        via = "Gmail SMTP"
+    log(f"邮件已发送({via}): {subject}")
     return True
 
 
@@ -198,8 +253,10 @@ def run(mode, force):
     n_con = int((df["tier"] == "CONSIDER").sum())
 
     report = build_cn_report(df, today_et, include_no_data=(mode == "preview"))
+    # Immediately above the list it describes, so it can't be skimmed past.
+    verdict = build_verdict(df, mode)
     body = (header + exit_reminder + ("\n" if exit_reminder else "")
-            + replay_section + report + footer)
+            + replay_section + verdict + report + footer)
     save_report(mode, body)
 
     if mode == "confirm":
