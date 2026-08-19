@@ -14,9 +14,10 @@ from datetime import date
 import pandas as pd
 
 from scanner import (
-    PermanentDataError, _parse_mcap, build_term_structure, build_verdict,
-    canon, classify, consider_reason, entry_exit, filter_dates,
-    next_trading_day, prev_trading_day,
+    COL_ENTRY, COL_EXIT, PermanentDataError, _fmt_wan, _parse_mcap,
+    build_cn_report, build_term_structure, build_verdict, canon, classify,
+    consider_reason, entry_exit, filter_dates, next_trading_day,
+    prev_trading_day, round_metrics,
 )
 
 
@@ -132,6 +133,71 @@ def test_consider_reason_shows_distance_to_threshold():
     assert "差 0.028 到 1.25" in consider_reason(_con(ivrv=1.222))
 
 
+def test_consider_reason_uses_raw_ratio_not_display_value():
+    # classify() judges the raw ratio but the DataFrame carries it rounded to
+    # 3dp, so a row that failed at 1.2496 stored 1.25 and rendered
+    # "1.25，差 0 到 1.25" — a gap of zero on a row that did not pass.
+    row = _con(ivrv=1.25)          # what round_metrics() stored
+    row["iv30_rv30_raw"] = 1.2496  # what classify() actually saw
+    out = consider_reason(row)
+    assert "差 0" not in out.replace("差 0.0004", ""), out
+    assert "差 0.0004 到 1.25" in out, out
+
+
+def test_consider_reason_falls_back_when_raw_column_absent():
+    # Rows replayed from a CSV written before iv30_rv30_raw existed.
+    assert "差 0.028 到 1.25" in consider_reason(_con(ivrv=1.222))
+
+
+def test_round_metrics_keeps_the_raw_ratio():
+    m = {"iv30": 0.5, "rv30": 0.4, "iv30_rv30": 1.2496, "ts_slope_0_45": -0.01}
+    out = round_metrics(m)
+    assert out["iv30_rv30"] == 1.25 and out["iv30_rv30_raw"] == 1.2496
+
+
+def test_fmt_wan_never_zeroes_a_positive_gap():
+    # A gap under 500 shares used to print "0万", so a row that failed the
+    # volume gate read as "差 0万 到 150万" — i.e. already there.
+    assert _fmt_wan(300) == "<0.1万"
+    assert _fmt_wan(0) == "0万"
+    assert _fmt_wan(1_500_000) == "150万"
+    assert _fmt_wan(1_779_053) == "177.9万"
+
+
+def test_consider_reason_volume_gap_stays_nonzero_at_the_boundary():
+    out = consider_reason(_con(vol=1_499_700, ivrv_ok=True, vol_ok=False))
+    assert "差 <0.1万 到 150万" in out, out
+
+
+def _report_row(**kw):
+    row = {"tier": "RECOMMENDED", "symbol": "YMM", "company": "Full Truck",
+           "earnings_date": date(2026, 8, 19), "timing": "BMO", "mcap_$B": 9.2,
+           COL_ENTRY: date(2026, 8, 18), COL_EXIT: date(2026, 8, 19),
+           "iv30_rv30": 1.965, "ts_slope_0_45": -0.01642,
+           "expected_move_pct": 5.0}
+    row.update(kw)
+    return row
+
+
+def test_report_explains_a_missing_expected_move():
+    # straddle stays None when an ATM leg has no two-sided quote (ZERO_BID),
+    # and None in a float column is NaN — which rendered as "预期波动=nan%",
+    # indistinguishable from a computation bug. YMM/ZTO, 2026-08-19.
+    df = pd.DataFrame([_report_row(expected_move_pct=None),
+                       _report_row(symbol="TGT", expected_move_pct=7.08)])
+    out = build_cn_report(df, date(2026, 8, 18))
+    assert "nan" not in out, out
+    assert "预期波动=不可用(ATM 缺双边报价,未用 ask/2 估算)" in out
+    assert "预期波动=7.08%" in out
+
+
+def test_verdict_silent_when_only_avoid_rows():
+    # README used to say the verdict appears whenever recommendations are 0;
+    # it is also silent when nothing reached CONSIDER either.
+    assert build_verdict(pd.DataFrame([_con(tier="AVOID")]), "confirm") == ""
+    assert build_verdict(pd.DataFrame([_con(tier="NO_DATA")]), "confirm") == ""
+
+
 def test_consider_reason_marks_inverted_ivrv():
     # AMAT on 2026-08-13: IV *cheaper* than realized — not "nearly there".
     out = consider_reason(_con(ivrv=0.69))
@@ -183,6 +249,10 @@ def test_replay_grade_bands():
     # Calibrated on the 2026-07-15/16 replay: CTAS 6.13/5.69=1.08 -> 🟠,
     # HOMB 4.44/2.30=1.93 -> 🔴, ELV 9.88/6.50=1.52 -> 🔴, FHN 1.71/3.70 -> ✅.
     assert grade(None) == "❓"
+    # A ZERO_BID name has no expected move; NaN must not grade as 🔴, which
+    # would let "no data" count as "moved far more than expected" in the
+    # cumulative stats the thresholds are tuned on.
+    assert grade(float("nan")) == "❓"
     assert grade(0.46) == "✅"
     assert grade(0.7) == "🟢"
     assert grade(1.08) == "🟠"

@@ -399,6 +399,10 @@ def round_metrics(m):
         rv30=round(m["rv30"], 4),
         iv30_rv30=round(m["iv30_rv30"], 3),
         ts_slope_0_45=round(m["ts_slope_0_45"], 5),
+        # classify() 判的是生值,而展示值被 round 到 3 位。只留展示值的话,
+        # 生值 1.2496(判 CONSIDER)会存成 1.25,渲染出「1.25,差 0 到 1.25」
+        # 这种自相矛盾的输出。原值单独留一列给 consider_reason() 用。
+        iv30_rv30_raw=float(m["iv30_rv30"]),
         expected_move_pct=opt("expected_move_pct", 2),
         front_spread_pct=opt("front_spread_pct", 3),
         iv_pc_div=opt("iv_pc_div", 3),
@@ -612,8 +616,15 @@ def _is_true(v):
 
 
 def _fmt_wan(x):
-    """Volume in 万 (10k) — 1_779_053 -> '177.9万', 1_500_000 -> '150万'."""
+    """Volume in 万 (10k) — 1_779_053 -> '177.9万', 1_500_000 -> '150万'.
+
+    A positive value under 500 shares must not render as '0万': this formats
+    the *gap* to the volume gate too, and '差 0万 到 150万' reads as "already
+    there" for a row that in fact failed the gate.
+    """
     v = x / 10_000
+    if 0 < abs(v) < 0.05:
+        return ("<0.1万" if v > 0 else ">-0.1万")
     return f"{v:.0f}万" if abs(v - round(v)) < 0.05 else f"{v:.1f}万"
 
 
@@ -633,10 +644,15 @@ def consider_reason(r):
     if r.get("tier") != "CONSIDER" or "ivrv_ok" not in r or "vol_ok" not in r:
         return ""
     if not _is_true(r["ivrv_ok"]):
+        # 生值优先:展示值 round 到 3 位后会让边界样本的差额算成 0。
+        # 旧 CSV 没有这一列,回退到展示值(差额会偏小但不会崩)。
         try:
-            ivrv = float(r["iv30_rv30"])
+            ivrv = float(r["iv30_rv30_raw"])
         except (KeyError, TypeError, ValueError):
-            return "  ← IV 不够贵(策略核心边缘缺失)"
+            try:
+                ivrv = float(r["iv30_rv30"])
+            except (KeyError, TypeError, ValueError):
+                return "  ← IV 不够贵(策略核心边缘缺失)"
         gap = MIN_IV30_RV30 - ivrv
         # Below 1.0 is not "nearly there" — implied is cheaper than realized,
         # so the short front leg is being sold at a discount, not a premium.
@@ -709,9 +725,15 @@ def build_cn_report(df, today_et, include_no_data=True):
         lines.append(f"  开仓: 布里斯班 {fmt_bne(entry_bne)}{entry_flag}")
         lines.append(f"  平仓: 布里斯班 {fmt_bne(exit_bne)}")
         if r["tier"] != "NO_DATA":
+            # straddle 只在四条腿都有正的双边报价时才计算(见 :328)。拿不到时
+            # expected_move_pct 是 None,进 DataFrame 变 NaN,直接插值会渲染成
+            # 「预期波动=nan%」—— 看着像算错了,其实是本模块拒绝用 ask/2 造价。
+            em = r["expected_move_pct"]
+            em_txt = ("不可用(ATM 缺双边报价,未用 ask/2 估算)"
+                      if em is None or pd.isna(em) else f"{em}%")
             lines.append(
                 f"  IV/RV={r['iv30_rv30']}  期限斜率={r['ts_slope_0_45']}"
-                f"  预期波动={r['expected_move_pct']}%"
+                f"  预期波动={em_txt}"
             )
             flags = r.get("flags") if "flags" in r else None
             if isinstance(flags, str) and flags:
@@ -940,8 +962,10 @@ def scan(min_days, max_days, workers, verify, refresh_universe,
             if check is not None:
                 row["earnings_check"] = check
             results.append(row)
+            _em = disp["expected_move_pct"]
             print(f"  {c['symbol']:<6} {tier:<11} iv/rv={disp['iv30_rv30']:<6} "
-                  f"slope={disp['ts_slope_0_45']:<9} em={disp['expected_move_pct']}%")
+                  f"slope={disp['ts_slope_0_45']:<9} "
+                  f"em={'n/a' if _em is None else f'{_em}%'}")
 
     if not results:
         print("\nAll candidates failed analysis.")
