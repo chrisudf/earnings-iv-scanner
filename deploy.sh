@@ -56,13 +56,21 @@ if [ ! -f "$CONFIG" ]; then
     scp notify_config.json root@<本机IP>:$BASE_DIR/
 不传的话脚本只会把信号存成本地文件，不发邮件。"
 fi
+# 两种传输任选其一。服务器上**必须**用 Resend:DigitalOcean 在网络层封了出网
+# 25/465/587,smtplib 连不上任何服务商(2026-08-18 起,详见 README)。
 "$PY" -c "
 import json,sys
 c=json.load(open('$CONFIG'))
-missing=[k for k in ('gmail_user','gmail_app_password','send_to') if not c.get(k)]
-sys.exit('notify_config.json 缺字段: '+', '.join(missing) if missing else 0)
+if not c.get('send_to') and not c.get('gmail_user'):
+    sys.exit('notify_config.json 缺 send_to(收件地址)')
+if c.get('resend_api_key'):
+    sys.exit(0)
+if c.get('gmail_user') and c.get('gmail_app_password'):
+    sys.exit('notify_config.json 只配了 Gmail SMTP,而本机出网 SMTP 很可能被封。'
+             '请改配 resend_api_key(见 README)')
+sys.exit('notify_config.json 没有可用的发信配置: 需要 resend_api_key')
 " || die "邮件配置不完整"
-chmod 600 "$CONFIG"   # 里面是 Gmail 应用专用密码
+chmod 600 "$CONFIG"   # 里面是 Resend API key / Gmail 应用专用密码
 
 mkdir -p "$BASE_DIR/scans"
 

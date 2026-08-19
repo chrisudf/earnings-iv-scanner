@@ -97,8 +97,26 @@ Preview 不能再早:Yahoo 期权报价延迟 15 分钟,开盘后约 30 分钟�
 (夏令时 05:45,冬令时 06:45,= ET 15:45)手动下单 ATM 日历价差 → 当晚 23:45(冬令时
 00:45,= ET 09:45)平仓;Preview 邮件里附平仓安全网提醒(它比平仓时刻晚半小时到)。
 
-**邮件配置**(一次性):去 https://myaccount.google.com/apppasswords 生成 Gmail
-应用专用密码,填进 `notify_config.json` 的 `gmail_app_password`。不填则只存本地文件不发邮件。
+**邮件配置**(一次性)。`notify_config.json` 支持两种发信通道,有 `resend_api_key`
+就走它,否则回退 Gmail SMTP:
+
+```json
+{
+  "resend_api_key": "re_xxxxxxxx",
+  "mail_from": "onboarding@resend.dev",
+  "send_to": "you@gmail.com"
+}
+```
+
+- **Resend(HTTPS 443,服务器上必须用这个)**:去 https://resend.com 注册,
+  注册邮箱要和 `send_to` 一致,拿 API key 填进 `resend_api_key`。`mail_from` 不填
+  默认用 `onboarding@resend.dev`(Resend 的公共发件地址,不需要你有域名)。
+  ⚠️ 免费版未验证域名时**只能发给注册账号的那个邮箱**——单收件人正好够用,
+  以后要加第二个收件人就得验证一个自有域名、并把 `mail_from` 换成该域名下的地址。
+- **Gmail SMTP(端口 465)**:去 https://myaccount.google.com/apppasswords 生成应用
+  专用密码填 `gmail_app_password`。Windows 本地可用;**droplet 上不通**(见下文 DO 封端口)。
+
+`send_to` 可以写成逗号分隔的多个地址。两个都不配则只存本地文件不发邮件。
 
 **注意**:电脑需处于开机或睡眠状态(任务已设置"唤醒运行"+"错过后尽快补跑";
 补跑时若已错过 ET 窗口会自动跳过,不会发过期信号)。运行日志在 `scans/notify_log.txt`。
@@ -206,7 +224,24 @@ SMTP,需开工单申请解封(批得慢且常被拒)。
 **时间线**:2026-08-15 05:15 最后一次发信成功 → 2026-08-18 00:15 第一次失败,周末期间
 DO 侧生效。
 
-**修法**:改走 HTTPS 邮件 API(443 通),见上面「自动运行 + 邮件信号」一节。
+**修法**:改走 Resend 的 HTTPS API(443 通)。`notify.py` 的 `send_email()` 已按
+`resend_api_key` 是否存在自动选通道,只需在 droplet 上把 key 写进 `notify_config.json`:
+
+```bash
+python3 - <<'EOF'
+import json, pathlib
+p = pathlib.Path("/root/earnings-iv-scanner/notify_config.json")
+c = json.loads(p.read_text())
+c["resend_api_key"] = "re_xxxxxxxx"     # 换成你的
+c["mail_from"] = "onboarding@resend.dev"
+p.write_text(json.dumps(c, indent=2))
+EOF
+chmod 600 /root/earnings-iv-scanner/notify_config.json
+cd /root/earnings-iv-scanner && .venv/bin/python notify.py confirm --force   # 冒烟,会真发一封
+```
+
+`deploy.sh` 的配置校验也会拦下"服务器上只配了 Gmail SMTP"这种情况并给出提示。
+不改 crontab、不改窗口逻辑——坏的只有最后一步发信。
 
 ## 数据源
 
